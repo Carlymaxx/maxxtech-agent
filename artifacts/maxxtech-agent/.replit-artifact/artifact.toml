@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "MaxxTech Agent"
+version = "1.0.0"
+id = "artifacts/maxxtech-agent"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23192
+
+[services.development]
+run = "pnpm --filter @workspace/maxxtech-agent run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/maxxtech-agent", "run", "build" ]
+publicDir = "artifacts/maxxtech-agent/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23192"
+BASE_PATH = "/"
