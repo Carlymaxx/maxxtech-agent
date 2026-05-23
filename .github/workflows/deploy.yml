@@ -1,0 +1,21 @@
+name: Deploy MaxxTech Agent
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 153.75.250.72
+          username: root
+          password: ${{ secrets.VPS_PASSWORD }}
+          script: |
+            cd /opt/maxxtech-agent
+            git pull origin main
+            docker compose up -d --build
+            echo "MaxxTech Agent deployed successfully!"
