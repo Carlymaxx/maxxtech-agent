@@ -3,20 +3,29 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: MaxxTech AI Agent API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: conversations
+    description: Chat conversations
+  - name: messages
+    description: Chat messages
+  - name: agent
+    description: AI agent operations
+  - name: settings
+    description: User and agent settings
+  - name: tools
+    description: Tool execution history
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,13 +33,461 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /conversations:
+    get:
+      operationId: listConversations
+      tags: [conversations]
+      summary: List all conversations
+      responses:
+        "200":
+          description: List of conversations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Conversation"
+    post:
+      operationId: createConversation
+      tags: [conversations]
+      summary: Create a new conversation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConversationInput"
+      responses:
+        "201":
+          description: Created conversation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Conversation"
+
+  /conversations/{id}:
+    get:
+      operationId: getConversation
+      tags: [conversations]
+      summary: Get a conversation by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Conversation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Conversation"
+        "404":
+          description: Not found
+    patch:
+      operationId: updateConversation
+      tags: [conversations]
+      summary: Update a conversation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConversationUpdate"
+      responses:
+        "200":
+          description: Updated conversation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Conversation"
+    delete:
+      operationId: deleteConversation
+      tags: [conversations]
+      summary: Delete a conversation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /conversations/{id}/messages:
+    get:
+      operationId: listMessages
+      tags: [messages]
+      summary: List messages in a conversation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Message"
+
+  /conversations/{id}/send:
+    post:
+      operationId: sendMessage
+      tags: [agent]
+      summary: Send a message and get AI response with tool calls
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageInput"
+      responses:
+        "200":
+          description: AI response with tool usage
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentResponse"
+
+  /agent/run-code:
+    post:
+      operationId: runCode
+      tags: [agent]
+      summary: Execute code in a sandbox
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CodeRunInput"
+      responses:
+        "200":
+          description: Code execution result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodeRunResult"
+
+  /agent/web-search:
+    post:
+      operationId: webSearch
+      tags: [agent]
+      summary: Search the web
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebSearchInput"
+      responses:
+        "200":
+          description: Web search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebSearchResult"
+
+  /agent/stats:
+    get:
+      operationId: getAgentStats
+      tags: [agent]
+      summary: Get dashboard stats (total conversations, messages, tool calls)
+      responses:
+        "200":
+          description: Agent stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentStats"
+
+  /tools/history:
+    get:
+      operationId: listToolHistory
+      tags: [tools]
+      summary: List recent tool call history
+      responses:
+        "200":
+          description: Tool history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ToolCall"
+
+  /settings:
+    get:
+      operationId: getSettings
+      tags: [settings]
+      summary: Get agent settings
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settings"
+    patch:
+      operationId: updateSettings
+      tags: [settings]
+      summary: Update agent settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SettingsUpdate"
+      responses:
+        "200":
+          description: Updated settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settings"
+
 components:
   schemas:
     HealthStatus:
       type: object
+      required: [status]
       properties:
         status:
           type: string
-      required:
-        - status
 
+    Conversation:
+      type: object
+      required: [id, title, createdAt, updatedAt, messageCount]
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        model:
+          type: ["string", "null"]
+        pinned:
+          type: boolean
+        messageCount:
+          type: integer
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+
+    ConversationInput:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+          minLength: 1
+        model:
+          type: string
+
+    ConversationUpdate:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 1
+        pinned:
+          type: boolean
+        model:
+          type: string
+
+    Message:
+      type: object
+      required: [id, conversationId, role, content, createdAt]
+      properties:
+        id:
+          type: integer
+        conversationId:
+          type: integer
+        role:
+          type: string
+          enum: [user, assistant, system, tool]
+        content:
+          type: string
+        toolCalls:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+
+    MessageInput:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+          minLength: 1
+
+    AgentResponse:
+      type: object
+      required: [message, toolCalls]
+      properties:
+        message:
+          $ref: "#/components/schemas/Message"
+        toolCalls:
+          type: array
+          items:
+            $ref: "#/components/schemas/ToolCall"
+        thinking:
+          type: ["string", "null"]
+
+    ToolCall:
+      type: object
+      required: [id, toolName, status, createdAt]
+      properties:
+        id:
+          type: integer
+        messageId:
+          type: ["integer", "null"]
+        toolName:
+          type: string
+        input:
+          type: ["string", "null"]
+        output:
+          type: ["string", "null"]
+        status:
+          type: string
+          enum: [running, success, error]
+        durationMs:
+          type: ["integer", "null"]
+        createdAt:
+          type: string
+
+    CodeRunInput:
+      type: object
+      required: [code, language]
+      properties:
+        code:
+          type: string
+        language:
+          type: string
+          enum: [javascript, typescript, python, bash, shell]
+
+    CodeRunResult:
+      type: object
+      required: [stdout, stderr, exitCode, durationMs]
+      properties:
+        stdout:
+          type: string
+        stderr:
+          type: string
+        exitCode:
+          type: integer
+        durationMs:
+          type: integer
+
+    WebSearchInput:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          minLength: 1
+
+    WebSearchResult:
+      type: object
+      required: [query, results]
+      properties:
+        query:
+          type: string
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchResultItem"
+
+    SearchResultItem:
+      type: object
+      required: [title, url, snippet]
+      properties:
+        title:
+          type: string
+        url:
+          type: string
+        snippet:
+          type: string
+
+    AgentStats:
+      type: object
+      required: [totalConversations, totalMessages, totalToolCalls, modelsUsed]
+      properties:
+        totalConversations:
+          type: integer
+        totalMessages:
+          type: integer
+        totalToolCalls:
+          type: integer
+        modelsUsed:
+          type: array
+          items:
+            type: string
+
+    Settings:
+      type: object
+      required: [id, agentName, model, systemPrompt, enableCodeExecution, enableWebSearch, theme, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+        agentName:
+          type: string
+        model:
+          type: string
+        systemPrompt:
+          type: string
+        enableCodeExecution:
+          type: boolean
+        enableWebSearch:
+          type: boolean
+        maxTokens:
+          type: ["integer", "null"]
+        temperature:
+          type: ["number", "null"]
+        theme:
+          type: string
+          enum: [light, dark, system]
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+
+    SettingsUpdate:
+      type: object
+      properties:
+        agentName:
+          type: string
+        model:
+          type: string
+        systemPrompt:
+          type: string
+        enableCodeExecution:
+          type: boolean
+        enableWebSearch:
+          type: boolean
+        maxTokens:
+          type: ["integer", "null"]
+        temperature:
+          type: ["number", "null"]
+        theme:
+          type: string
+          enum: [light, dark, system]
