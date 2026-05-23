@@ -8,6 +8,7 @@
 
 export * from './agentResponse';
 export * from './agentStats';
+export * from './anthropicMessageInput';
 export * from './codeRunInput';
 export * from './codeRunInputLanguage';
 export * from './codeRunResult';

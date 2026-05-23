@@ -182,3 +182,8 @@ export interface SettingsUpdate {
   theme?: SettingsUpdateTheme;
 }
 
+export interface AnthropicMessageInput {
+  content: string;
+  model?: string;
+}
+

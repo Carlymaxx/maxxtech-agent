@@ -1,72 +1,171 @@
-import React, { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useParams, useLocation } from "wouter";
-import { useListMessages, useGetConversation, useSendMessage, useCreateConversation } from "@workspace/api-client-react";
+import {
+  useListMessages,
+  useGetConversation,
+  useCreateConversation,
+  getListMessagesQueryKey,
+  getListConversationsQueryKey,
+} from "@workspace/api-client-react";
 import { MessageBubble } from "@/components/chat/message-bubble";
 import { ChatInput } from "@/components/chat/chat-input";
 import { Loader2, Zap } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 
+interface StreamingMessage {
+  role: "assistant";
+  content: string;
+  isStreaming: boolean;
+}
+
 export function ChatPage() {
   const params = useParams();
-  const [location, setLocation] = useLocation();
+  const [, setLocation] = useLocation();
   const isNew = !params.id;
   const conversationId = isNew ? undefined : parseInt(params.id as string, 10);
 
-  const { data: conversation, isLoading: isLoadingConv } = useGetConversation(conversationId!, {
-    query: { enabled: !!conversationId, queryKey: ['/api/conversations', conversationId] }
-  });
+  const { data: conversation, isLoading: isLoadingConv } = useGetConversation(
+    conversationId!,
+    { query: { enabled: !!conversationId, queryKey: ["/api/conversations", conversationId] } }
+  );
 
-  const { data: messages, isLoading: isLoadingMessages } = useListMessages(conversationId!, {
-    query: { enabled: !!conversationId, queryKey: ['/api/conversations', conversationId, 'messages'] }
-  });
+  const { data: messages, isLoading: isLoadingMessages } = useListMessages(
+    conversationId!,
+    {
+      query: {
+        enabled: !!conversationId,
+        queryKey: getListMessagesQueryKey(conversationId!),
+      },
+    }
+  );
 
   const createConvMutation = useCreateConversation();
-  const sendMessageMutation = useSendMessage();
   const queryClient = useQueryClient();
 
   const [isGenerating, setIsGenerating] = useState(false);
+  const [streamingMessage, setStreamingMessage] = useState<StreamingMessage | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (scrollRef.current) {
-      scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+      scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
     }
-  }, [messages, isGenerating]);
+  }, [messages, streamingMessage?.content, isGenerating]);
 
-  const handleSend = async (content: string, model: string) => {
+  const handleSend = useCallback(async (content: string, model: string) => {
     setIsGenerating(true);
+    setStreamingMessage(null);
     let targetId = conversationId;
 
-    if (!targetId) {
-      const newConv = await createConvMutation.mutateAsync({
-        data: { title: content.substring(0, 40) + (content.length > 40 ? "..." : ""), model }
-      });
-      targetId = newConv.id;
-      // We push state so that the input doesn't lose focus
-      setLocation(`/c/${newConv.id}`);
-    }
-
     try {
-      await sendMessageMutation.mutateAsync({
-        id: targetId!,
-        data: { content }
+      if (!targetId) {
+        const newConv = await createConvMutation.mutateAsync({
+          data: {
+            title: content.substring(0, 50) + (content.length > 50 ? "..." : ""),
+            model,
+          },
+        });
+        targetId = newConv.id;
+        setLocation(`/c/${newConv.id}`);
+        // Small delay so the route change settles before we start streaming
+        await new Promise((r) => setTimeout(r, 50));
+      }
+
+      const abort = new AbortController();
+      abortRef.current = abort;
+
+      setStreamingMessage({ role: "assistant", content: "", isStreaming: true });
+
+      const response = await fetch(`/api/conversations/${targetId}/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content, model }),
+        signal: abort.signal,
       });
-      queryClient.invalidateQueries({ queryKey: ['/api/conversations', targetId, 'messages'] });
+
+      if (!response.ok || !response.body) {
+        throw new Error(`Stream failed: ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split("\n");
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const raw = line.slice(6).trim();
+          if (!raw) continue;
+
+          try {
+            const event = JSON.parse(raw) as {
+              content?: string;
+              done?: boolean;
+              error?: string;
+            };
+
+            if (event.error) {
+              throw new Error(event.error);
+            }
+
+            if (event.content) {
+              accumulated += event.content;
+              setStreamingMessage({ role: "assistant", content: accumulated, isStreaming: true });
+            }
+
+            if (event.done) {
+              setStreamingMessage(null);
+              // Invalidate so the real persisted messages load
+              await queryClient.invalidateQueries({
+                queryKey: getListMessagesQueryKey(targetId!),
+              });
+              await queryClient.invalidateQueries({
+                queryKey: getListConversationsQueryKey(),
+              });
+            }
+          } catch {
+            // skip malformed SSE lines
+          }
+        }
+      }
+    } catch (err) {
+      if ((err as Error).name !== "AbortError") {
+        setStreamingMessage({
+          role: "assistant",
+          content: `Something went wrong: ${(err as Error).message}`,
+          isStreaming: false,
+        });
+      }
     } finally {
       setIsGenerating(false);
+      abortRef.current = null;
     }
-  };
+  }, [conversationId, createConvMutation, queryClient, setLocation]);
+
+  const allMessages = [
+    ...(messages ?? []),
+    ...(streamingMessage
+      ? [{ id: -1, conversationId: conversationId ?? -1, role: streamingMessage.role, content: streamingMessage.content, toolCalls: null, createdAt: new Date().toISOString(), isStreaming: streamingMessage.isStreaming }]
+      : []),
+  ];
 
   return (
     <div className="flex flex-col h-full w-full max-w-5xl mx-auto relative bg-background">
-      {/* Header for loaded conversation */}
       {!isNew && (
         <div className="h-14 border-b border-border flex items-center px-6 shrink-0 bg-background/95 backdrop-blur z-10 sticky top-0">
           {isLoadingConv ? (
             <div className="h-5 w-48 bg-secondary rounded animate-pulse" />
           ) : (
             <h1 className="font-semibold text-foreground tracking-tight flex items-center gap-2">
-              <span className="text-muted-foreground font-normal text-sm">Chat /</span> {conversation?.title}
+              <span className="text-muted-foreground font-normal text-sm">Chat /</span>{" "}
+              {conversation?.title}
             </h1>
           )}
         </div>
@@ -81,7 +180,8 @@ export function ChatPage() {
             <div className="space-y-2">
               <h2 className="text-3xl font-bold tracking-tight">How can I help you today?</h2>
               <p className="text-muted-foreground text-sm sm:text-base leading-relaxed">
-                I'm the MaxxTech Agent, your personal command-center AI. I can search the web, run code, and help you solve complex technical problems.
+                I'm MaxxTech Agent — powered by Claude. I can write and run code, search the
+                web, and help with any tech or IT task.
               </p>
             </div>
           </div>
@@ -92,17 +192,21 @@ export function ChatPage() {
                 <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
               </div>
             ) : (
-              messages?.map((msg) => (
-                <MessageBubble key={msg.id} message={msg} />
+              allMessages.map((msg, i) => (
+                <MessageBubble
+                  key={msg.id === -1 ? `streaming-${i}` : msg.id}
+                  message={msg}
+                  isStreaming={"isStreaming" in msg ? (msg.isStreaming as boolean) : false}
+                />
               ))
             )}
-            {isGenerating && (
+            {isGenerating && !streamingMessage && (
               <div className="flex items-center gap-3 text-muted-foreground text-sm pl-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
                 <div className="flex gap-1.5 items-center bg-secondary/50 px-3 py-2 rounded-full border border-border">
-                  <span className="w-1.5 h-1.5 bg-primary rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                  <span className="w-1.5 h-1.5 bg-primary rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                  <span className="w-1.5 h-1.5 bg-primary rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                  <span className="ml-1 font-medium text-xs uppercase tracking-widest text-primary">Generating</span>
+                  <span className="w-1.5 h-1.5 bg-primary rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                  <span className="w-1.5 h-1.5 bg-primary rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                  <span className="w-1.5 h-1.5 bg-primary rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                  <span className="ml-1 font-medium text-xs uppercase tracking-widest text-primary">Thinking</span>
                 </div>
               </div>
             )}

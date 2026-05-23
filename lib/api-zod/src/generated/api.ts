@@ -215,6 +215,19 @@ export const ListToolHistoryResponse = zod.array(ListToolHistoryResponseItem)
 
 
 /**
+ * @summary Send a message and receive a real AI response via SSE stream
+ */
+export const SendAnthropicMessageParams = zod.object({
+  "id": zod.coerce.number()
+})
+
+export const SendAnthropicMessageBody = zod.object({
+  "content": zod.string(),
+  "model": zod.string().optional()
+})
+
+
+/**
  * @summary Get agent settings
  */
 export const GetSettingsResponse = zod.object({

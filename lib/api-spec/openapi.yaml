@@ -20,6 +20,8 @@ tags:
     description: User and agent settings
   - name: tools
     description: Tool execution history
+  - name: anthropic
+    description: Anthropic AI chat operations
 paths:
   /healthz:
     get:
@@ -234,6 +236,29 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/ToolCall"
+
+  /conversations/{id}/stream:
+    post:
+      operationId: sendAnthropicMessage
+      tags: [anthropic]
+      summary: Send a message and receive a real AI response via SSE stream
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnthropicMessageInput"
+      responses:
+        "200":
+          description: SSE stream of assistant response chunks
+          content:
+            text/event-stream: {}
 
   /settings:
     get:
@@ -491,3 +516,12 @@ components:
         theme:
           type: string
           enum: [light, dark, system]
+
+    AnthropicMessageInput:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+        model:
+          type: string

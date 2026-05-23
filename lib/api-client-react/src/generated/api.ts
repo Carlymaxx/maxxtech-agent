@@ -22,6 +22,7 @@ import type {
 import type {
   AgentResponse,
   AgentStats,
+  AnthropicMessageInput,
   CodeRunInput,
   CodeRunResult,
   Conversation,
@@ -937,6 +938,78 @@ export function useListToolHistory<TData = Awaited<ReturnType<typeof listToolHis
 
 
 
+
+export const getSendAnthropicMessageUrl = (id: number,) => {
+
+
+
+
+  return `/api/conversations/${id}/stream`
+}
+
+/**
+ * @summary Send a message and receive a real AI response via SSE stream
+ */
+export const sendAnthropicMessage = async (id: number,
+    anthropicMessageInput: AnthropicMessageInput, options?: RequestInit): Promise<unknown> => {
+
+  return customFetch<unknown>(getSendAnthropicMessageUrl(id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      anthropicMessageInput,)
+  }
+);}
+
+
+
+
+export const getSendAnthropicMessageMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sendAnthropicMessage>>, TError,{id: number;data: BodyType<AnthropicMessageInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof sendAnthropicMessage>>, TError,{id: number;data: BodyType<AnthropicMessageInput>}, TContext> => {
+
+const mutationKey = ['sendAnthropicMessage'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof sendAnthropicMessage>>, {id: number;data: BodyType<AnthropicMessageInput>}> = (props) => {
+          const {id,data} = props ?? {};
+
+          return  sendAnthropicMessage(id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SendAnthropicMessageMutationResult = NonNullable<Awaited<ReturnType<typeof sendAnthropicMessage>>>
+    export type SendAnthropicMessageMutationBody = BodyType<AnthropicMessageInput>
+    export type SendAnthropicMessageMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Send a message and receive a real AI response via SSE stream
+ */
+export const useSendAnthropicMessage = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sendAnthropicMessage>>, TError,{id: number;data: BodyType<AnthropicMessageInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof sendAnthropicMessage>>,
+        TError,
+        {id: number;data: BodyType<AnthropicMessageInput>},
+        TContext
+      > => {
+      return useMutation(getSendAnthropicMessageMutationOptions(options));
+    }
 
 export const getGetSettingsUrl = () => {
 
