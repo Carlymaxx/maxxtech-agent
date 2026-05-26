@@ -3,8 +3,9 @@ import {
   useListConversations,
   useUpdateConversation,
   useDeleteConversation,
+  getListConversationsQueryKey,
 } from "@workspace/api-client-react";
-import { Plus, MessageSquare, Settings, Pin, MoreVertical, Trash2, Zap } from "lucide-react";
+import { Plus, MessageSquare, Settings, Pin, MoreVertical, Trash2, Zap, Eraser } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -15,13 +16,28 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
+import { useState } from "react";
 
 export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
-  const [location] = useLocation();
+  const [location, setLocation] = useLocation();
   const { data: conversations, isLoading } = useListConversations();
+  const queryClient = useQueryClient();
+  const [clearing, setClearing] = useState(false);
 
   const pinned = conversations?.filter((c) => c.pinned) ?? [];
   const recent = conversations?.filter((c) => !c.pinned) ?? [];
+
+  const handleClearAll = async () => {
+    if (!confirm("Delete ALL conversations? This cannot be undone.")) return;
+    setClearing(true);
+    try {
+      await fetch("/api/conversations", { method: "DELETE" });
+      await queryClient.invalidateQueries({ queryKey: getListConversationsQueryKey() });
+      if (location.startsWith("/c/")) setLocation("/");
+    } finally {
+      setClearing(false);
+    }
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -61,20 +77,33 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
                     key={conv.id}
                     conv={conv}
                     active={location === `/c/${conv.id}`}
+                    onNavigate={onNavigate}
                   />
                 ))}
               </div>
             )}
             {recent.length > 0 && (
               <div className="space-y-0.5">
-                <p className="text-[10px] font-semibold text-muted-foreground px-2 uppercase tracking-widest mb-1.5">
-                  Recent
-                </p>
+                <div className="flex items-center justify-between px-2 mb-1.5">
+                  <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">
+                    Recent
+                  </p>
+                  <button
+                    onClick={handleClearAll}
+                    disabled={clearing}
+                    title="Clear all history"
+                    className="flex items-center gap-1 text-[10px] text-muted-foreground/60 hover:text-destructive transition-colors disabled:opacity-40"
+                  >
+                    <Eraser className="w-3 h-3" />
+                    {clearing ? "Clearing…" : "Clear all"}
+                  </button>
+                </div>
                 {recent.map((conv) => (
                   <ConversationItem
                     key={conv.id}
                     conv={conv}
                     active={location === `/c/${conv.id}`}
+                    onNavigate={onNavigate}
                   />
                 ))}
               </div>
@@ -113,7 +142,9 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
-function ConversationItem({ conv, active }: { conv: any; active: boolean }) {
+function ConversationItem({
+  conv, active, onNavigate,
+}: { conv: any; active: boolean; onNavigate?: () => void }) {
   const updateMutation = useUpdateConversation();
   const deleteMutation = useDeleteConversation();
   const queryClient = useQueryClient();
@@ -123,7 +154,7 @@ function ConversationItem({ conv, active }: { conv: any; active: boolean }) {
     e.preventDefault();
     e.stopPropagation();
     await updateMutation.mutateAsync({ id: conv.id, data: { pinned: !conv.pinned } });
-    queryClient.invalidateQueries({ queryKey: ["/api/conversations"] });
+    queryClient.invalidateQueries({ queryKey: getListConversationsQueryKey() });
   };
 
   const handleDelete = async (e: React.MouseEvent) => {
@@ -131,22 +162,19 @@ function ConversationItem({ conv, active }: { conv: any; active: boolean }) {
     e.stopPropagation();
     if (confirm("Delete this conversation?")) {
       await deleteMutation.mutateAsync({ id: conv.id });
-      queryClient.invalidateQueries({ queryKey: ["/api/conversations"] });
+      queryClient.invalidateQueries({ queryKey: getListConversationsQueryKey() });
       if (active) setLocation("/");
     }
   };
 
   const timeAgo = (() => {
-    try {
-      return formatDistanceToNow(new Date(conv.updatedAt), { addSuffix: true });
-    } catch {
-      return "";
-    }
+    try { return formatDistanceToNow(new Date(conv.updatedAt), { addSuffix: true }); } catch { return ""; }
   })();
 
   return (
     <Link
       href={`/c/${conv.id}`}
+      onClick={onNavigate}
       className={`group flex items-center justify-between px-2 py-2 text-xs rounded-md transition-colors cursor-pointer ${
         active
           ? "bg-primary/15 text-primary font-medium border border-primary/20"

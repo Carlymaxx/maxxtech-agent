@@ -79,6 +79,12 @@ router.patch("/conversations/:id", async (req, res): Promise<void> => {
   res.json(UpdateConversationResponse.parse(serializeDates(conv)));
 });
 
+router.delete("/conversations", async (_req, res): Promise<void> => {
+  await db.delete(messagesTable);
+  await db.delete(conversationsTable);
+  res.sendStatus(204);
+});
+
 router.delete("/conversations/:id", async (req, res): Promise<void> => {
   const params = DeleteConversationParams.safeParse(req.params);
   if (!params.success) {

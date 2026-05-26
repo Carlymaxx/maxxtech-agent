@@ -143,7 +143,7 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
       });
 
       const stream = anthropic.messages.stream({
-        model: "claude-sonnet-4-6",
+        model: requestedModel,
         max_tokens: 8192,
         system: systemPrompt,
         messages: anthropicMessages,
