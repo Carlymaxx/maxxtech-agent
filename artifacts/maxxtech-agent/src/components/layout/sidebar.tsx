@@ -16,7 +16,7 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 
-export function Sidebar() {
+export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const [location] = useLocation();
   const { data: conversations, isLoading } = useListConversations();
 
@@ -34,7 +34,7 @@ export function Sidebar() {
           <span className="font-bold tracking-tight text-sm text-foreground">MaxxTech</span>
         </div>
         <Button asChild variant="secondary" className="w-full justify-start gap-2 h-9 text-sm" data-testid="button-new-chat">
-          <Link href="/">
+          <Link href="/" onClick={onNavigate}>
             <Plus className="w-4 h-4" />
             <span className="font-semibold">New Chat</span>
           </Link>
