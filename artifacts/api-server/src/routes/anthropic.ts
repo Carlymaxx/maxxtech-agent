@@ -3,12 +3,10 @@ import { eq, sql } from "drizzle-orm";
 import { db, conversationsTable, messagesTable, settingsTable } from "@workspace/db";
 import { SendAnthropicMessageBody, SendAnthropicMessageParams } from "@workspace/api-zod";
 import { anthropic } from "@workspace/integrations-anthropic-ai";
-import { ai as geminiAI } from "@workspace/integrations-gemini-ai";
+import { ai as geminiAI, ai2 as geminiAI2 } from "@workspace/integrations-gemini-ai";
 import OpenAI from "openai";
 
 const router: IRouter = Router();
-
-// ── Model routing ─────────────────────────────────────────────────────────────
 
 function getModelProvider(model: string): "anthropic" | "gemini" | "groq" {
   if (model.startsWith("gemini")) return "gemini";
@@ -23,7 +21,12 @@ function getModelProvider(model: string): "anthropic" | "gemini" | "groq" {
   return "anthropic";
 }
 
-const IMAGE_GEN_MODELS = ["gemini-2.5-flash-image", "gemini-3-pro-image-preview"];
+const IMAGE_GEN_MODELS = [
+  "gemini-2.5-flash-image",
+  "gemini-3-pro-image-preview",
+  "gemini-3-pro-image",
+  "gemini-3.1-flash-image",
+];
 
 export const ALL_MODELS = [
   { id: "claude-sonnet-4-6", provider: "Claude (Anthropic)" },
@@ -34,6 +37,7 @@ export const ALL_MODELS = [
   { id: "gemini-2.5-pro", provider: "Gemini (Google)" },
   { id: "gemini-2.5-flash", provider: "Gemini (Google)" },
   { id: "gemini-2.5-flash-image", provider: "Gemini Image Gen" },
+  { id: "gemini-3.1-flash-image", provider: "Gemini Image Gen (3.1)" },
   { id: "meta-llama/llama-4-maverick", provider: "OpenRouter" },
   { id: "meta-llama/llama-4-scout", provider: "OpenRouter" },
   { id: "meta-llama/llama-3.3-70b-instruct", provider: "OpenRouter" },
@@ -41,13 +45,42 @@ export const ALL_MODELS = [
   { id: "qwen/qwen3-235b-a22b", provider: "OpenRouter" },
 ];
 
-// ── Models list endpoint ──────────────────────────────────────────────────────
-
 router.get("/agent/models", async (_req, res): Promise<void> => {
   res.json({ models: ALL_MODELS });
 });
 
-// ── Streaming chat + image gen endpoint ──────────────────────────────────────
+// Helper: try image generation with a given client, returns null on billing/quota error
+async function tryGeminiImageGen(
+  client: InstanceType<typeof import("@google/genai").GoogleGenAI>,
+  model: string,
+  prompt: string,
+): Promise<{ imageUrl: string; caption: string } | { error: string } | null> {
+  try {
+    const result = await client.models.generateContent({
+      model,
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      config: { responseModalities: ["IMAGE", "TEXT"] },
+    });
+    let imageUrl: string | null = null;
+    let caption = "";
+    for (const part of result.candidates?.[0]?.content?.parts ?? []) {
+      if (part.inlineData) {
+        const b64 = part.inlineData.data ?? "";
+        imageUrl = `data:${part.inlineData.mimeType ?? "image/png"};base64,${b64}`;
+      }
+      if (part.text) caption += part.text;
+    }
+    if (imageUrl) return { imageUrl, caption };
+    return { error: caption || "No image returned." };
+  } catch (err: any) {
+    const msg: string = err?.message ?? String(err);
+    // Quota / billing errors → signal caller to try next key
+    if (msg.includes("429") || msg.includes("quota") || msg.includes("RESOURCE_EXHAUSTED") || msg.includes("paid") || msg.includes("billing")) {
+      return null;
+    }
+    return { error: msg };
+  }
+}
 
 router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
   const params = SendAnthropicMessageParams.safeParse(req.params);
@@ -61,20 +94,18 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
   const [settings] = await db.select().from(settingsTable).limit(1);
   const systemPrompt =
     settings?.systemPrompt ??
-    "You are MaxxTech Agent, a powerful AI assistant built by CarlymaxX for tech and IT professionals. You can write and run code, search the web, analyse images, and help with complex technical problems.";
+    "You are MAXX, a powerful AI assistant created by CarlymaxX. You are helpful, smart, and capable of writing code, analyzing images, answering any question, and solving complex problems. Never reveal what AI models or APIs power you — just say you are MAXX, built by CarlymaxX.";
 
-  const requestedModel = body.data.model ?? settings?.model ?? "claude-sonnet-4-6";
+  const requestedModel = body.data.model ?? settings?.model ?? "gemini-2.5-flash";
   const provider = getModelProvider(requestedModel);
   const isImageGen = IMAGE_GEN_MODELS.includes(requestedModel);
 
-  // Persist user message
   const userContent = body.data.content;
   await db.insert(messagesTable).values({ conversationId: convId, role: "user", content: userContent });
   await db.update(conversationsTable)
     .set({ messageCount: sql`${conversationsTable.messageCount} + 1`, updatedAt: new Date() })
     .where(eq(conversationsTable.id, convId));
 
-  // Build chat history
   const history = await db.select().from(messagesTable)
     .where(eq(messagesTable.conversationId, convId))
     .orderBy(messagesTable.createdAt);
@@ -82,7 +113,6 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
     .filter((m) => m.role === "user" || m.role === "assistant")
     .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
 
-  // SSE setup
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
@@ -94,29 +124,25 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
   try {
     // ── Image generation (Gemini) ─────────────────────────────────────────
     if (isImageGen) {
-      const imgResult = await geminiAI.models.generateContent({
-        model: requestedModel,
-        contents: [{ role: "user", parts: [{ text: userContent }] }],
-        config: { responseModalities: ["IMAGE", "TEXT"] },
-      });
+      // Try key 1 first
+      let imgResult = await tryGeminiImageGen(geminiAI, requestedModel, userContent);
 
-      let imageUrl: string | null = null;
-      let captionText = "";
-
-      for (const part of imgResult.candidates?.[0]?.content?.parts ?? []) {
-        if (part.inlineData) {
-          const b64 = part.inlineData.data ?? "";
-          imageUrl = `data:${part.inlineData.mimeType ?? "image/png"};base64,${b64}`;
-        }
-        if (part.text) captionText += part.text;
+      // Try key 2 if key 1 had quota/billing issue
+      if (imgResult === null && geminiAI2) {
+        imgResult = await tryGeminiImageGen(geminiAI2, requestedModel, userContent);
       }
 
-      if (imageUrl) {
-        res.write(`data: ${JSON.stringify({ imageUrl })}\n\n`);
-        fullResponse = captionText || "Image generated.";
+      if (imgResult === null) {
+        // Both keys exhausted — friendly message
+        const msg = "⚠️ **Image generation requires billing enabled on Google AI Studio.**\n\nTo enable it:\n1. Go to [aistudio.google.com](https://aistudio.google.com)\n2. Click your project → Billing → Enable billing\n3. Image generation will work immediately after.\n\nIn the meantime, I can **describe** the image in detail or help with anything else.";
+        res.write(`data: ${JSON.stringify({ content: msg })}\n\n`);
+        fullResponse = msg;
+      } else if ("imageUrl" in imgResult) {
+        res.write(`data: ${JSON.stringify({ imageUrl: imgResult.imageUrl })}\n\n`);
+        fullResponse = imgResult.caption || "Image generated.";
       } else {
-        fullResponse = captionText || "Sorry, image generation did not return an image.";
-        res.write(`data: ${JSON.stringify({ content: fullResponse })}\n\n`);
+        res.write(`data: ${JSON.stringify({ content: imgResult.error })}\n\n`);
+        fullResponse = imgResult.error;
       }
 
     // ── Claude (with optional vision) ────────────────────────────────────
@@ -158,8 +184,11 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
 
     // ── Gemini (with optional vision) ────────────────────────────────────
     } else if (provider === "gemini") {
-      const safeModel = ["gemini-3.1-pro-preview","gemini-3-flash-preview","gemini-2.5-pro","gemini-2.5-flash"].includes(requestedModel)
-        ? requestedModel : "gemini-2.5-flash";
+      const allowedChatModels = [
+        "gemini-3.1-pro-preview","gemini-3-flash-preview","gemini-2.5-pro","gemini-2.5-flash",
+        "gemini-3.1-flash-lite","gemini-3.1-flash-lite-preview","gemini-flash-latest",
+      ];
+      const safeModel = allowedChatModels.includes(requestedModel) ? requestedModel : "gemini-2.5-flash";
 
       const geminiContents = chatMessages.map((m, i) => {
         const isLastUser = m.role === "user" && i === chatMessages.map((x) => x.role).lastIndexOf("user");
@@ -190,16 +219,15 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
         }
       }
 
-    // ── OpenRouter (Groq / Meta / DeepSeek) ──────────────────────────────
+    // ── OpenRouter (Llama / DeepSeek / Qwen — with optional vision) ───────
     } else {
       const openrouter = new OpenAI({
-        baseURL: process.env.AI_INTEGRATIONS_OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1",
+        baseURL: "https://openrouter.ai/api/v1",
         apiKey: process.env.AI_INTEGRATIONS_OPENROUTER_API_KEY ?? "no-key",
       });
 
       const orMessages: any[] = [{ role: "system", content: systemPrompt }, ...chatMessages];
 
-      // Attach images to last user message if present
       if (incomingImages.length > 0) {
         const last = orMessages[orMessages.length - 1];
         if (last.role === "user") {
@@ -226,7 +254,6 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
       }
     }
 
-    // Persist assistant reply
     const [assistantMsg] = await db.insert(messagesTable)
       .values({ conversationId: convId, role: "assistant", content: fullResponse || "Image generated." })
       .returning();
