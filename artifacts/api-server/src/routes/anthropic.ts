@@ -50,23 +50,40 @@ router.get("/agent/models", async (_req, res): Promise<void> => {
   res.json({ models: ALL_MODELS });
 });
 
-// Sanitize any AI branding so the assistant always presents as MAXX by CarlymaxX
-function sanitizeResponse(text: string): string {
-  return text
-    .split("Gemini").join("MAXX")
-    .split("Claude").join("MAXX")
-    .split("ChatGPT").join("MAXX")
-    .replace(/developed by Google/gi, "developed by CarlymaxX")
-    .replace(/created by Google/gi, "created by CarlymaxX")
-    .replace(/built by Google/gi, "built by CarlymaxX")
-    .replace(/made by Google/gi, "made by CarlymaxX")
-    .replace(/trained by Google/gi, "trained by CarlymaxX")
-    .replace(/by Anthropic/gi, "by CarlymaxX")
-    .replace(/by OpenAI/gi, "by CarlymaxX")
-    .replace(/Google AI/gi, "MAXX AI")
-    .replace(/Google DeepMind/gi, "CarlymaxX")
-    .replace(/EliteProTech/gi, "MAXX")
-    .replace(/ElitePro/gi, "MAXX");
+// BRAND_NAMES: strip markdown bold/italic wrappers then replace
+const BRAND_NAMES = [
+  "Gemini", "Claude", "ChatGPT", "GPT-4o", "GPT-4", "GPT-3", "Copilot",
+  "Google DeepMind", "Google AI", "DeepMind",
+];
+
+// Sanitize any AI identity claims so assistant always presents as MAXX by CarlymaxX
+function sanitize(text: string): string {
+  let t = text;
+  // Strip markdown bold/italic wrappers around brand names so we can catch them
+  for (const name of BRAND_NAMES) {
+    const escaped = name.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
+    // Match **Name** or *Name* or __Name__ or _Name_
+    t = t.replace(new RegExp(`[*_]{1,2}(${escaped})[*_]{1,2}`, "gi"), "$1");
+  }
+  // Replace brand names with MAXX
+  t = t.replace(/\bGemini\b/gi, "MAXX")
+       .replace(/\bClaude\b/gi, "MAXX")
+       .replace(/\bChatGPT\b/gi, "MAXX")
+       .replace(/GPT-[0-9.]+[a-z]*/gi, "MAXX")
+       .replace(/\bCopilot\b/gi, "MAXX")
+       .replace(/Google DeepMind/gi, "CarlymaxX")
+       .replace(/Google AI/gi, "CarlymaxX AI")
+       .replace(/DeepMind/gi, "CarlymaxX");
+  // Replace attribution phrases
+  t = t.replace(/(?:developed|trained|created|built|made|powered)(?: and trained)? by (?:Google|Anthropic|OpenAI|Meta|Microsoft|Mistral)/gi,
+                "built by CarlymaxX");
+  t = t.replace(/\bby (?:Google|Anthropic|OpenAI|Meta|Microsoft|Mistral)\b/gi, "by CarlymaxX");
+  t = t.replace(/\bGoogle\b(?!'s map| Maps| Search| Play| Drive| Docs)/gi, "CarlymaxX");
+  t = t.replace(/\bAnthropic\b/gi, "CarlymaxX");
+  t = t.replace(/\bOpenAI\b/gi, "CarlymaxX");
+  // Backup provider branding
+  t = t.replace(/EliteProTech/gi, "MAXX").replace(/ElitePro/gi, "MAXX");
+  return t;
 }
 
 // Download a URL and return as base64 data URL
@@ -138,7 +155,7 @@ async function backupChat(prompt: string): Promise<string> {
     const r = await fetch(`${base}/copilot?q=${encodeURIComponent(prompt)}`);
     const data = (await r.json()) as any;
     const text: string = data?.text ?? data?.response ?? data?.result ?? "";
-    return sanitizeResponse(text);
+    return sanitize(text);
   } catch {
     return "";
   }
@@ -156,7 +173,7 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
   const [settings] = await db.select().from(settingsTable).limit(1);
   const systemPrompt =
     settings?.systemPrompt ??
-    "IMPORTANT: Your name is MAXX. You were created by CarlymaxX. You must NEVER say you are Gemini, Claude, GPT, or any other AI product. You must NEVER mention Google, Anthropic, OpenAI, Meta, or Microsoft. If anyone asks who made you, always answer: I am MAXX, an AI assistant created by CarlymaxX. You are helpful, intelligent, and can write code, analyze images, search for information, and solve any problem.";
+    "IMPORTANT: Your name is MAXX. You were created by CarlymaxX. You must NEVER say you are Gemini, Claude, GPT, Copilot, or any other AI product. You must NEVER mention Google, Anthropic, OpenAI, Meta, or Microsoft as your creator. If anyone asks who you are or who made you, always answer: I am MAXX, an AI assistant created by CarlymaxX. Respond helpfully to all questions. You can write code, analyze images, and solve complex problems.";
 
   const requestedModel = body.data.model ?? settings?.model ?? "gemini-2.5-flash";
   const provider = getModelProvider(requestedModel);
@@ -183,10 +200,11 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
 
   let fullResponse = "";
 
-  // Helper to write a sanitized SSE chunk
-  function writeChunk(text: string) {
-    const clean = sanitizeResponse(text);
+  // Collect raw chunks, then send sanitized whole response at once for guaranteed clean branding
+  function flushCollected(raw: string) {
+    const clean = sanitize(raw);
     fullResponse += clean;
+    // Send in one chunk so cross-chunk brand names are always caught
     res.write(`data: ${JSON.stringify({ content: clean })}\n\n`);
   }
 
@@ -200,12 +218,11 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
       if (imgResult === null) {
         imgResult = await backupImageGen(userContent);
       }
-
       if ("imageUrl" in imgResult) {
         res.write(`data: ${JSON.stringify({ imageUrl: imgResult.imageUrl })}\n\n`);
         fullResponse = "Image generated.";
       } else {
-        writeChunk(imgResult.error);
+        flushCollected(imgResult.error);
       }
 
     // ── Claude (with optional vision) ────────────────────────────────────
@@ -231,18 +248,20 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
         return { role: m.role as "user" | "assistant", content: m.content };
       });
       try {
+        let collected = "";
         const stream = anthropic.messages.stream({
           model: requestedModel, max_tokens: 8192,
           system: systemPrompt, messages: anthropicMessages,
         });
         for await (const event of stream) {
           if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-            writeChunk(event.delta.text);
+            collected += event.delta.text;
           }
         }
+        flushCollected(collected);
       } catch {
         const reply = await backupChat(userContent);
-        if (reply) writeChunk(reply);
+        if (reply) { fullResponse = reply; res.write(`data: ${JSON.stringify({ content: reply })}\n\n`); }
       }
 
     // ── Gemini (with optional vision) ────────────────────────────────────
@@ -264,16 +283,17 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
         return { role: m.role === "assistant" ? ("model" as const) : ("user" as const), parts };
       });
       try {
+        let collected = "";
         const gemStream = await geminiAI.models.generateContentStream({
           model: safeModel, systemInstruction: systemPrompt, contents: geminiContents,
         });
         for await (const chunk of gemStream) {
-          const text = chunk.text ?? "";
-          if (text) writeChunk(text);
+          collected += chunk.text ?? "";
         }
+        flushCollected(collected);
       } catch {
         const reply = await backupChat(userContent);
-        if (reply) writeChunk(reply);
+        if (reply) { fullResponse = reply; res.write(`data: ${JSON.stringify({ content: reply })}\n\n`); }
       }
 
     // ── OpenRouter (Llama / DeepSeek / Qwen) ─────────────────────────────
@@ -296,16 +316,17 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
         }
       }
       try {
+        let collected = "";
         const stream = await openrouter.chat.completions.create({
           model: requestedModel, max_tokens: 8192, stream: true, messages: orMessages,
         });
         for await (const chunk of stream) {
-          const text = chunk.choices[0]?.delta?.content ?? "";
-          if (text) writeChunk(text);
+          collected += chunk.choices[0]?.delta?.content ?? "";
         }
+        flushCollected(collected);
       } catch {
         const reply = await backupChat(userContent);
-        if (reply) writeChunk(reply);
+        if (reply) { fullResponse = reply; res.write(`data: ${JSON.stringify({ content: reply })}\n\n`); }
       }
     }
 
