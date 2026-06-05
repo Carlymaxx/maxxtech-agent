@@ -12,10 +12,20 @@ if (!process.env.AI_INTEGRATIONS_GEMINI_API_KEY) {
   );
 }
 
+const httpOpts = {
+  apiVersion: "",
+  baseUrl: process.env.AI_INTEGRATIONS_GEMINI_BASE_URL,
+};
+
 export const ai = new GoogleGenAI({
   apiKey: process.env.AI_INTEGRATIONS_GEMINI_API_KEY,
-  httpOptions: {
-    apiVersion: "",
-    baseUrl: process.env.AI_INTEGRATIONS_GEMINI_BASE_URL,
-  },
+  httpOptions: httpOpts,
 });
+
+// Secondary key for fallback (e.g. image generation quota)
+export const ai2 = process.env.AI_INTEGRATIONS_GEMINI_API_KEY_2
+  ? new GoogleGenAI({
+      apiKey: process.env.AI_INTEGRATIONS_GEMINI_API_KEY_2,
+      httpOptions: httpOpts,
+    })
+  : null;
