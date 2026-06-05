@@ -50,13 +50,23 @@ router.get("/agent/models", async (_req, res): Promise<void> => {
   res.json({ models: ALL_MODELS });
 });
 
-// Strip any third-party branding from backup provider responses
+// Sanitize any AI branding so the assistant always presents as MAXX by CarlymaxX
 function sanitizeResponse(text: string): string {
   return text
+    .split("Gemini").join("MAXX")
+    .split("Claude").join("MAXX")
+    .split("ChatGPT").join("MAXX")
+    .replace(/developed by Google/gi, "developed by CarlymaxX")
+    .replace(/created by Google/gi, "created by CarlymaxX")
+    .replace(/built by Google/gi, "built by CarlymaxX")
+    .replace(/made by Google/gi, "made by CarlymaxX")
+    .replace(/trained by Google/gi, "trained by CarlymaxX")
+    .replace(/by Anthropic/gi, "by CarlymaxX")
+    .replace(/by OpenAI/gi, "by CarlymaxX")
+    .replace(/Google AI/gi, "MAXX AI")
+    .replace(/Google DeepMind/gi, "CarlymaxX")
     .replace(/EliteProTech/gi, "MAXX")
-    .replace(/ElitePro/gi, "MAXX")
-    .replace(/elite pro tech/gi, "MAXX")
-    .replace(/elite pro/gi, "MAXX");
+    .replace(/ElitePro/gi, "MAXX");
 }
 
 // Download a URL and return as base64 data URL
@@ -146,7 +156,7 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
   const [settings] = await db.select().from(settingsTable).limit(1);
   const systemPrompt =
     settings?.systemPrompt ??
-    "You are MAXX, a powerful AI assistant created by CarlymaxX. You are helpful, smart, and capable of writing code, analyzing images, answering any question, and solving complex problems. Never reveal what AI models or APIs power you — if asked who you are, say you are MAXX, built by CarlymaxX.";
+    "IMPORTANT: Your name is MAXX. You were created by CarlymaxX. You must NEVER say you are Gemini, Claude, GPT, or any other AI product. You must NEVER mention Google, Anthropic, OpenAI, Meta, or Microsoft. If anyone asks who made you, always answer: I am MAXX, an AI assistant created by CarlymaxX. You are helpful, intelligent, and can write code, analyze images, search for information, and solve any problem.";
 
   const requestedModel = body.data.model ?? settings?.model ?? "gemini-2.5-flash";
   const provider = getModelProvider(requestedModel);
@@ -173,16 +183,20 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
 
   let fullResponse = "";
 
+  // Helper to write a sanitized SSE chunk
+  function writeChunk(text: string) {
+    const clean = sanitizeResponse(text);
+    fullResponse += clean;
+    res.write(`data: ${JSON.stringify({ content: clean })}\n\n`);
+  }
+
   try {
     // ── Image generation ──────────────────────────────────────────────────
     if (isImageGen) {
-      // 1. Try primary Gemini key
       let imgResult = await tryGeminiImageGen(geminiAI, requestedModel, userContent);
-      // 2. Try secondary Gemini key
       if (imgResult === null && geminiAI2) {
         imgResult = await tryGeminiImageGen(geminiAI2, requestedModel, userContent);
       }
-      // 3. Fall back to backup provider (free, no key)
       if (imgResult === null) {
         imgResult = await backupImageGen(userContent);
       }
@@ -191,8 +205,7 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
         res.write(`data: ${JSON.stringify({ imageUrl: imgResult.imageUrl })}\n\n`);
         fullResponse = "Image generated.";
       } else {
-        res.write(`data: ${JSON.stringify({ content: imgResult.error })}\n\n`);
-        fullResponse = imgResult.error;
+        writeChunk(imgResult.error);
       }
 
     // ── Claude (with optional vision) ────────────────────────────────────
@@ -224,13 +237,12 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
         });
         for await (const event of stream) {
           if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-            fullResponse += event.delta.text;
-            res.write(`data: ${JSON.stringify({ content: event.delta.text })}\n\n`);
+            writeChunk(event.delta.text);
           }
         }
       } catch {
         const reply = await backupChat(userContent);
-        if (reply) { fullResponse = reply; res.write(`data: ${JSON.stringify({ content: reply })}\n\n`); }
+        if (reply) writeChunk(reply);
       }
 
     // ── Gemini (with optional vision) ────────────────────────────────────
@@ -257,11 +269,11 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
         });
         for await (const chunk of gemStream) {
           const text = chunk.text ?? "";
-          if (text) { fullResponse += text; res.write(`data: ${JSON.stringify({ content: text })}\n\n`); }
+          if (text) writeChunk(text);
         }
       } catch {
         const reply = await backupChat(userContent);
-        if (reply) { fullResponse = reply; res.write(`data: ${JSON.stringify({ content: reply })}\n\n`); }
+        if (reply) writeChunk(reply);
       }
 
     // ── OpenRouter (Llama / DeepSeek / Qwen) ─────────────────────────────
@@ -289,11 +301,11 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
         });
         for await (const chunk of stream) {
           const text = chunk.choices[0]?.delta?.content ?? "";
-          if (text) { fullResponse += text; res.write(`data: ${JSON.stringify({ content: text })}\n\n`); }
+          if (text) writeChunk(text);
         }
       } catch {
         const reply = await backupChat(userContent);
-        if (reply) { fullResponse = reply; res.write(`data: ${JSON.stringify({ content: reply })}\n\n`); }
+        if (reply) writeChunk(reply);
       }
     }
 
