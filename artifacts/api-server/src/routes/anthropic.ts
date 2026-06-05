@@ -5,6 +5,7 @@ import { SendAnthropicMessageBody, SendAnthropicMessageParams } from "@workspace
 import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { ai as geminiAI, ai2 as geminiAI2 } from "@workspace/integrations-gemini-ai";
 import OpenAI from "openai";
+import https from "https";
 
 const router: IRouter = Router();
 
@@ -49,7 +50,31 @@ router.get("/agent/models", async (_req, res): Promise<void> => {
   res.json({ models: ALL_MODELS });
 });
 
-// Helper: try image generation with a given client, returns null on billing/quota error
+// Strip any third-party branding from backup provider responses
+function sanitizeResponse(text: string): string {
+  return text
+    .replace(/EliteProTech/gi, "MAXX")
+    .replace(/ElitePro/gi, "MAXX")
+    .replace(/elite pro tech/gi, "MAXX")
+    .replace(/elite pro/gi, "MAXX");
+}
+
+// Download a URL and return as base64 data URL
+function fetchAsDataUrl(url: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    https.get(url, (r) => {
+      const chunks: Buffer[] = [];
+      r.on("data", (c) => chunks.push(c));
+      r.on("end", () => {
+        const mime = r.headers["content-type"] ?? "image/jpeg";
+        resolve(`data:${mime};base64,${Buffer.concat(chunks).toString("base64")}`);
+      });
+      r.on("error", reject);
+    }).on("error", reject);
+  });
+}
+
+// Try Gemini image gen — returns null on quota/billing error
 async function tryGeminiImageGen(
   client: InstanceType<typeof import("@google/genai").GoogleGenAI>,
   model: string,
@@ -65,8 +90,7 @@ async function tryGeminiImageGen(
     let caption = "";
     for (const part of result.candidates?.[0]?.content?.parts ?? []) {
       if (part.inlineData) {
-        const b64 = part.inlineData.data ?? "";
-        imageUrl = `data:${part.inlineData.mimeType ?? "image/png"};base64,${b64}`;
+        imageUrl = `data:${part.inlineData.mimeType ?? "image/png"};base64,${part.inlineData.data ?? ""}`;
       }
       if (part.text) caption += part.text;
     }
@@ -74,11 +98,39 @@ async function tryGeminiImageGen(
     return { error: caption || "No image returned." };
   } catch (err: any) {
     const msg: string = err?.message ?? String(err);
-    // Quota / billing errors → signal caller to try next key
-    if (msg.includes("429") || msg.includes("quota") || msg.includes("RESOURCE_EXHAUSTED") || msg.includes("paid") || msg.includes("billing")) {
+    if (
+      msg.includes("429") || msg.includes("quota") ||
+      msg.includes("RESOURCE_EXHAUSTED") || msg.includes("paid") || msg.includes("billing")
+    )
       return null;
-    }
     return { error: msg };
+  }
+}
+
+// Generate image via backup provider (no key required)
+async function backupImageGen(prompt: string): Promise<{ imageUrl: string } | { error: string }> {
+  try {
+    const base = process.env.BACKUP_AI_URL ?? "";
+    if (!base) return { error: "No backup provider configured." };
+    const url = `${base}/zonerai?prompt=${encodeURIComponent(prompt)}`;
+    const dataUrl = await fetchAsDataUrl(url);
+    return { imageUrl: dataUrl };
+  } catch (err: any) {
+    return { error: err?.message ?? "Backup image generation failed." };
+  }
+}
+
+// Get a chat response from backup provider (no key required)
+async function backupChat(prompt: string): Promise<string> {
+  try {
+    const base = process.env.BACKUP_AI_URL ?? "";
+    if (!base) return "";
+    const r = await fetch(`${base}/copilot?q=${encodeURIComponent(prompt)}`);
+    const data = (await r.json()) as any;
+    const text: string = data?.text ?? data?.response ?? data?.result ?? "";
+    return sanitizeResponse(text);
+  } catch {
+    return "";
   }
 }
 
@@ -94,7 +146,7 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
   const [settings] = await db.select().from(settingsTable).limit(1);
   const systemPrompt =
     settings?.systemPrompt ??
-    "You are MAXX, a powerful AI assistant created by CarlymaxX. You are helpful, smart, and capable of writing code, analyzing images, answering any question, and solving complex problems. Never reveal what AI models or APIs power you — just say you are MAXX, built by CarlymaxX.";
+    "You are MAXX, a powerful AI assistant created by CarlymaxX. You are helpful, smart, and capable of writing code, analyzing images, answering any question, and solving complex problems. Never reveal what AI models or APIs power you — if asked who you are, say you are MAXX, built by CarlymaxX.";
 
   const requestedModel = body.data.model ?? settings?.model ?? "gemini-2.5-flash";
   const provider = getModelProvider(requestedModel);
@@ -122,24 +174,22 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
   let fullResponse = "";
 
   try {
-    // ── Image generation (Gemini) ─────────────────────────────────────────
+    // ── Image generation ──────────────────────────────────────────────────
     if (isImageGen) {
-      // Try key 1 first
+      // 1. Try primary Gemini key
       let imgResult = await tryGeminiImageGen(geminiAI, requestedModel, userContent);
-
-      // Try key 2 if key 1 had quota/billing issue
+      // 2. Try secondary Gemini key
       if (imgResult === null && geminiAI2) {
         imgResult = await tryGeminiImageGen(geminiAI2, requestedModel, userContent);
       }
-
+      // 3. Fall back to backup provider (free, no key)
       if (imgResult === null) {
-        // Both keys exhausted — friendly message
-        const msg = "⚠️ **Image generation requires billing enabled on Google AI Studio.**\n\nTo enable it:\n1. Go to [aistudio.google.com](https://aistudio.google.com)\n2. Click your project → Billing → Enable billing\n3. Image generation will work immediately after.\n\nIn the meantime, I can **describe** the image in detail or help with anything else.";
-        res.write(`data: ${JSON.stringify({ content: msg })}\n\n`);
-        fullResponse = msg;
-      } else if ("imageUrl" in imgResult) {
+        imgResult = await backupImageGen(userContent);
+      }
+
+      if ("imageUrl" in imgResult) {
         res.write(`data: ${JSON.stringify({ imageUrl: imgResult.imageUrl })}\n\n`);
-        fullResponse = imgResult.caption || "Image generated.";
+        fullResponse = "Image generated.";
       } else {
         res.write(`data: ${JSON.stringify({ content: imgResult.error })}\n\n`);
         fullResponse = imgResult.error;
@@ -167,29 +217,29 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
         }
         return { role: m.role as "user" | "assistant", content: m.content };
       });
-
-      const stream = anthropic.messages.stream({
-        model: requestedModel,
-        max_tokens: 8192,
-        system: systemPrompt,
-        messages: anthropicMessages,
-      });
-
-      for await (const event of stream) {
-        if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-          fullResponse += event.delta.text;
-          res.write(`data: ${JSON.stringify({ content: event.delta.text })}\n\n`);
+      try {
+        const stream = anthropic.messages.stream({
+          model: requestedModel, max_tokens: 8192,
+          system: systemPrompt, messages: anthropicMessages,
+        });
+        for await (const event of stream) {
+          if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
+            fullResponse += event.delta.text;
+            res.write(`data: ${JSON.stringify({ content: event.delta.text })}\n\n`);
+          }
         }
+      } catch {
+        const reply = await backupChat(userContent);
+        if (reply) { fullResponse = reply; res.write(`data: ${JSON.stringify({ content: reply })}\n\n`); }
       }
 
     // ── Gemini (with optional vision) ────────────────────────────────────
     } else if (provider === "gemini") {
       const allowedChatModels = [
-        "gemini-3.1-pro-preview","gemini-3-flash-preview","gemini-2.5-pro","gemini-2.5-flash",
-        "gemini-3.1-flash-lite","gemini-3.1-flash-lite-preview","gemini-flash-latest",
+        "gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-2.5-pro", "gemini-2.5-flash",
+        "gemini-3.1-flash-lite", "gemini-3.1-flash-lite-preview", "gemini-flash-latest",
       ];
       const safeModel = allowedChatModels.includes(requestedModel) ? requestedModel : "gemini-2.5-flash";
-
       const geminiContents = chatMessages.map((m, i) => {
         const isLastUser = m.role === "user" && i === chatMessages.map((x) => x.role).lastIndexOf("user");
         const parts: any[] = [];
@@ -199,35 +249,28 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
           });
         }
         parts.push({ text: m.content });
-        return {
-          role: m.role === "assistant" ? ("model" as const) : ("user" as const),
-          parts,
-        };
+        return { role: m.role === "assistant" ? ("model" as const) : ("user" as const), parts };
       });
-
-      const gemStream = await geminiAI.models.generateContentStream({
-        model: safeModel,
-        systemInstruction: systemPrompt,
-        contents: geminiContents,
-      });
-
-      for await (const chunk of gemStream) {
-        const text = chunk.text ?? "";
-        if (text) {
-          fullResponse += text;
-          res.write(`data: ${JSON.stringify({ content: text })}\n\n`);
+      try {
+        const gemStream = await geminiAI.models.generateContentStream({
+          model: safeModel, systemInstruction: systemPrompt, contents: geminiContents,
+        });
+        for await (const chunk of gemStream) {
+          const text = chunk.text ?? "";
+          if (text) { fullResponse += text; res.write(`data: ${JSON.stringify({ content: text })}\n\n`); }
         }
+      } catch {
+        const reply = await backupChat(userContent);
+        if (reply) { fullResponse = reply; res.write(`data: ${JSON.stringify({ content: reply })}\n\n`); }
       }
 
-    // ── OpenRouter (Llama / DeepSeek / Qwen — with optional vision) ───────
+    // ── OpenRouter (Llama / DeepSeek / Qwen) ─────────────────────────────
     } else {
       const openrouter = new OpenAI({
         baseURL: "https://openrouter.ai/api/v1",
         apiKey: process.env.AI_INTEGRATIONS_OPENROUTER_API_KEY ?? "no-key",
       });
-
       const orMessages: any[] = [{ role: "system", content: systemPrompt }, ...chatMessages];
-
       if (incomingImages.length > 0) {
         const last = orMessages[orMessages.length - 1];
         if (last.role === "user") {
@@ -240,22 +283,22 @@ router.post("/conversations/:id/stream", async (req, res): Promise<void> => {
           ];
         }
       }
-
-      const stream = await openrouter.chat.completions.create({
-        model: requestedModel, max_tokens: 8192, stream: true, messages: orMessages,
-      });
-
-      for await (const chunk of stream) {
-        const text = chunk.choices[0]?.delta?.content ?? "";
-        if (text) {
-          fullResponse += text;
-          res.write(`data: ${JSON.stringify({ content: text })}\n\n`);
+      try {
+        const stream = await openrouter.chat.completions.create({
+          model: requestedModel, max_tokens: 8192, stream: true, messages: orMessages,
+        });
+        for await (const chunk of stream) {
+          const text = chunk.choices[0]?.delta?.content ?? "";
+          if (text) { fullResponse += text; res.write(`data: ${JSON.stringify({ content: text })}\n\n`); }
         }
+      } catch {
+        const reply = await backupChat(userContent);
+        if (reply) { fullResponse = reply; res.write(`data: ${JSON.stringify({ content: reply })}\n\n`); }
       }
     }
 
     const [assistantMsg] = await db.insert(messagesTable)
-      .values({ conversationId: convId, role: "assistant", content: fullResponse || "Image generated." })
+      .values({ conversationId: convId, role: "assistant", content: fullResponse || "Done." })
       .returning();
     await db.update(conversationsTable)
       .set({ messageCount: sql`${conversationsTable.messageCount} + 1`, updatedAt: new Date() })
